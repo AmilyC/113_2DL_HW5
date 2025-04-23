@@ -33,7 +33,7 @@ class DQN(nn.Module):
         - Feel free to change the architecture (e.g. number of hidden layers and the width of each hidden layer) as you like
         - Feel free to add any member variables/functions whenever needed
     """
-    def __init__(self, num_actions):
+    def __init__(self, input_dim,num_actions):
         super(DQN, self).__init__()
         # An example: 
         #self.network = nn.Sequential(
@@ -42,13 +42,37 @@ class DQN(nn.Module):
         #    nn.Linear(64, 64),
         #    nn.ReLU(),
         #    nn.Linear(64, num_actions)
-        #)       
+        #)
+        self.network = nn.Sequential(
+            nn.Conv2d(input_dim, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(7 * 7 * 64, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_actions)
+        #    nn.Conv2d(input_dim, 32, kernel_size=8, stride=4),
+        #    nn.ReLU(),
+        #    nn.Conv2d(32, 64, kernel_size=4, stride=2),
+        #    nn.ReLU(),
+        #    nn.Conv2d(64, 64, kernel_size=3, stride=1),
+        #    nn.ReLU(),
+        #    nn.Flatten(),
+        #    nn.Linear(7 * 7 * 64, 512),
+        #    nn.ReLU(),
+        #    nn.Linear(512, num_actions)
+        )          
+      
         ########## YOUR CODE HERE (5~10 lines) ##########
 
         
         ########## END OF YOUR CODE ##########
 
     def forward(self, x):
+        
         return self.network(x)
 
 
@@ -61,7 +85,11 @@ class AtariPreprocessor:
         self.frames = deque(maxlen=frame_stack)
 
     def preprocess(self, obs):
-        gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+        if len(obs.shape) == 3 and obs.shape[2] == 3:
+            gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = obs  # 已經是灰階圖像
+
         resized = cv2.resize(gray, (84, 84), interpolation=cv2.INTER_AREA)
         return resized
 
@@ -116,10 +144,16 @@ class DQNAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device:", self.device)
 
+        self.memory = deque(maxlen=args.memory_size)
+        state,info = self.env.reset()
+        state = self.preprocessor.reset(state)  # <- 這邊你用 preprocess 後會變成 shape = (4, 84, 84)
 
-        self.q_net = DQN(self.num_actions).to(self.device)
+        self.n_observation = state.shape[0]
+        # print("observation")
+        # print(self.n_observation)
+        self.q_net = DQN(self.n_observation,self.num_actions).to(self.device)
         self.q_net.apply(init_weights)
-        self.target_net = DQN(self.num_actions).to(self.device)
+        self.target_net = DQN(self.n_observation,self.num_actions).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=args.lr)
 
@@ -246,33 +280,37 @@ class DQNAgent:
        
         ########## YOUR CODE HERE (<5 lines) ##########
         # Sample a mini-batch of (s,a,r,s',done) from the replay buffer
-
-      
+        batch = random.sample(self.memory,self.batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
             
         ########## END OF YOUR CODE ##########
-
+       
         # Convert the states, actions, rewards, next_states, and dones into torch tensors
         # NOTE: Enable this part after you finish the mini-batch sampling
-        #states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
-        #next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
-        #actions = torch.tensor(actions, dtype=torch.int64).to(self.device)
-        #rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
-        #dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
-        #q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
+        next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.int64).to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
+        q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         
         ########## YOUR CODE HERE (~10 lines) ##########
         # Implement the loss function of DQN and the gradient updates 
-      
-        
-      
+        with torch.no_grad():
+            max_next_q_values = self.target_net(next_states).max(1)[0]
+            target_q_values = rewards + self.gamma * max_next_q_values * (1 - dones)
+        loss = nn.MSELoss()(q_values, target_q_values)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
         ########## END OF YOUR CODE ##########  
 
         if self.train_count % self.target_update_frequency == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
         # NOTE: Enable this part if "loss" is defined
-        #if self.train_count % 1000 == 0:
-        #    print(f"[Train #{self.train_count}] Loss: {loss.item():.4f} Q mean: {q_values.mean().item():.3f} std: {q_values.std().item():.3f}")
+        if self.train_count % 1000 == 0:
+           print(f"[Train #{self.train_count}] Loss: {loss.item():.4f} Q mean: {q_values.mean().item():.3f} std: {q_values.std().item():.3f}")
 
 
 if __name__ == "__main__":
@@ -292,6 +330,6 @@ if __name__ == "__main__":
     parser.add_argument("--train-per-step", type=int, default=1)
     args = parser.parse_args()
 
-    wandb.init(project="DLP-Lab5-DQN-CartPole", name=args.wandb_run_name, save_code=True)
-    agent = DQNAgent(args=args)
+    wandb.init(project="DLP-Lab5-DQN-Pong-v5", name=args.wandb_run_name, save_code=True)
+    agent = DQNAgent(env_name="ALE/Pong-v5" ,args=args)
     agent.run()
