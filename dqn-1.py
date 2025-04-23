@@ -17,6 +17,8 @@ import wandb
 import argparse
 import time
 
+from torch.autograd import Variable
+
 gym.register_envs(ale_py)
 
 
@@ -119,20 +121,44 @@ class PrioritizedReplayBuffer:
 
     def add(self, transition, error):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        
+        if (len(self.buffer)< self.capacity):
+            self.buffer.append(transition)
+        else:
+            self.buffer[self.pos] = transition
+        
+        self.priorities[self.pos] = max(error, 1e-5) ** self.alpha
+        self.pos +=1
+        if self.pos >=self.capacity:
+            self.pos=0
+        
         ########## END OF YOUR CODE (for Task 3) ########## 
         return 
     def sample(self, batch_size):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        if len(self.buffer)==0:
+            return [],[],[]
+        # Normalize priorities to get sampling probabilities
+        probs = self.priorities[:len(self.buffer)]
+        total = probs.sum()
+        probs /= total
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[i] for i in indices]
+
+        # Compute importance-sampling weights
+        weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
+        weights /= weights.max()  # Normalize for stability
+
+        return samples, indices, weights
         ########## END OF YOUR CODE (for Task 3) ########## 
-        return
     def update_priorities(self, indices, errors):
         ########## YOUR CODE HERE (for Task 3) ########## 
-                    
+        for idx, p in zip(indices, errors):
+            if idx < len(self.buffer):
+                self.priorities[idx] = max(p, 1e-5) ** self.alpha
         ########## END OF YOUR CODE (for Task 3) ########## 
         return
-        
 
 class DQNAgent:
     def __init__(self, env_name="CartPole-v1", args=None):
@@ -140,7 +166,7 @@ class DQNAgent:
         self.test_env = gym.make(env_name, render_mode="rgb_array")
         self.num_actions = self.env.action_space.n
         self.preprocessor = AtariPreprocessor()
-
+        self.prioritizedbuffer = PrioritizedReplayBuffer()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device:", self.device)
 
@@ -171,6 +197,8 @@ class DQNAgent:
         self.target_update_frequency = args.target_update_frequency
         self.train_per_step = args.train_per_step
         self.save_dir = args.save_dir
+
+        self.discount_factor = args.discount_factor
         os.makedirs(self.save_dir, exist_ok=True)
 
     def select_action(self, state):
@@ -301,6 +329,74 @@ class DQNAgent:
             target_q_values = rewards + self.gamma * max_next_q_values * (1 - dones)
         loss = nn.MSELoss()(q_values, target_q_values)
         self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        ########## END OF YOUR CODE ##########  
+
+        if self.train_count % self.target_update_frequency == 0:
+            self.target_net.load_state_dict(self.q_net.state_dict())
+
+        # NOTE: Enable this part if "loss" is defined
+        if self.train_count % 1000 == 0:
+           print(f"[Train #{self.train_count}] Loss: {loss.item():.4f} Q mean: {q_values.mean().item():.3f} std: {q_values.std().item():.3f}")
+
+    # save sample (error,<s,a,r,s> to replay memory)
+    def append_sample(self,state,action,reward,next_state,done):
+        state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
+        next_state_tensor = torch.tensor(next_state, dtype=torch.float32).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            q_vals = self.q_net(state_tensor)
+            old_val = q_vals[0][action].item()
+
+            target_q_vals = self.target_net(next_state_tensor)
+            if done:
+                target = reward
+            else:
+                target = reward + self.discount_factor * torch.max(target_q_vals).item()
+        error = abs(old_val - target)
+        transition = (state, action, reward, next_state, done)
+        self.prioritizedbuffer.add(transition, error)
+
+    def train_buffer(self):
+        if len(self.memory) < self.replay_start_size:
+            return 
+        
+        # Decay function for epsilin-greedy exploration
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+        self.train_count += 1
+       
+        ########## YOUR CODE HERE (<5 lines) ##########
+        # Sample a mini-batch of (s,a,r,s',done) from the replay buffer
+        samples, indices, weights = self.prioritizedbuffer.sample(self.batch_size)
+        weights = torch.tensor(weights, dtype=torch.float32).to(self.device)
+        states, actions, rewards, next_states, dones = zip(*samples)
+            
+        ########## END OF YOUR CODE ##########
+       
+        # Convert the states, actions, rewards, next_states, and dones into torch tensors
+        # NOTE: Enable this part after you finish the mini-batch sampling
+        states = torch.from_numpy(np.array(states).astype(np.float32)).to(self.device)
+        next_states = torch.from_numpy(np.array(next_states).astype(np.float32)).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.int64).to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        dones = torch.tensor(dones, dtype=torch.float32).to(self.device)
+        q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        
+        ########## YOUR CODE HERE (~10 lines) ##########
+        # Implement the loss function of DQN and the gradient updates 
+        with torch.no_grad():
+            max_next_q_values = self.target_net(next_states).max(1)[0]
+            target_q_values = rewards + self.gamma * max_next_q_values * (1 - dones)
+        
+        td_errors = q_values-target_q_values
+        # update priority
+        self.prioritizedbuffer.update_priorities(indices, td_errors.abs().detach().cpu().numpy())
+
+
+        self.optimizer.zero_grad()
+        loss = (weights * td_errors.pow(2)).mean()
         loss.backward()
         self.optimizer.step()
         ########## END OF YOUR CODE ##########  
