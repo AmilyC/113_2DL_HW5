@@ -22,15 +22,17 @@ def compute_scores(scores):
     first_score = scores[0]
     avg = sum(scores) / len(scores)
 
-    # Task 1: 正常公式
-    task1_score = min(avg, 480) / 480 * 15
+    avg = sum(scores) / len(scores)
 
-    # Task 2: 如果第一筆為負
-    if first_score < 0:
-        task2_score = (min(avg, 19) + 21) / 40 * 20
-    else:
+   
+    if any(s > 19 for s in scores):
+        task1_score = min(avg, 480) / 480 * 15
         task2_score = None
+    else:
+        task1_score = None
+        task2_score = (min(avg, 19) + 21) / 40 * 20
 
+   
     return task1_score, task2_score
 
 def find_best_task1_and_task2(root_path="a"):
@@ -42,7 +44,7 @@ def find_best_task1_and_task2(root_path="a"):
     for folder in os.listdir(root_path):
         if folder == "latest-run" or folder.endswith(".log"):
             continue
-        log_path = os.path.join(root_path, folder, "file", "output.log")
+        log_path = os.path.join(root_path, folder, "files", "output.log")
         scores = parse_trueeval_scores(log_path)
 
         task1_score, task2_score = compute_scores(scores)

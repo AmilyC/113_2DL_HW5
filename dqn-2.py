@@ -476,8 +476,9 @@ if __name__ == "__main__":
     parser.add_argument("--replay-start-size", type=int, default=50000)
     parser.add_argument("--max-episode-steps", type=int, default=10000)
     parser.add_argument("--train-per-step", type=int, default=1)
+    parser.add_argument("--episode", type=int, default=1000)
     args = parser.parse_args()
 
-    wandb.init(project="DLP-Lab5-DQN-CartPole", name=args.wandb_run_name, save_code=True)
-    agent = DQNAgent(args=args)
-    agent.run(buffer=True)
+    wandb.init(project="DLP-Lab5-DQN-Pong-v5", name=args.wandb_run_name, save_code=True)
+    agent = DQNAgent(env_name="ALE/Pong-v5",args=args)
+    agent.run(episodes=args.episode,buffer=True)
